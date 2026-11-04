@@ -40,7 +40,7 @@ The token is kept in this browser's `localStorage` and sent only to `api.github.
 It is one static file with no build step:
 
 ```
-python3 -m http.server --bind 127.0.0.1
+npx http-server -a 127.0.0.1 -p 8000
 ```
 
 Then open http://127.0.0.1:8000/.
