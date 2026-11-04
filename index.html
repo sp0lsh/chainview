@@ -1049,15 +1049,21 @@ const gh = {
 
   // a GitHub that does not serve issue dependencies rejects the whole query, so the first
   // rejection naming the field drops it for the rest of the session and refetches without it
-  async chain(repos) {
-    if (!S.net.deps) return gh.graphql(QUERY(repos, false));
+  async chainOf(repo) {
+    if (!S.net.deps) return gh.graphql(QUERY([repo], false));
     try {
-      return await gh.graphql(QUERY(repos, true));
+      return await gh.graphql(QUERY([repo], true));
     } catch (e) {
       if (!/blockedBy/i.test(e.message)) throw e;
       S.net.deps = false;
-      return gh.graphql(QUERY(repos, false));
+      return gh.graphql(QUERY([repo], false));
     }
+  },
+
+  // one query per repo: a query spanning busy repos can run past GitHub's timeout and answer 502
+  async chain(repos) {
+    const parts = await Promise.all(repos.map(gh.chainOf));
+    return Object.fromEntries(parts.map((part, i) => [alias(i), part[alias(0)]]));
   },
 
   me: () => gh.rest('/user'),
