@@ -1145,7 +1145,10 @@ query {${repos.map((r, i) => repoBlock(alias(i), r.owner, r.name, deps)).join('\
 // one snapshot of the world: the chain per repo, plus what production is running
 async function refreshSystem(repos, { probe = false } = {}) {
   // a query with no repos is an empty selection, which GitHub rejects
-  if (!repos.length) return { chain: {}, deploys: {}, at: new Date().toISOString() };
+  if (!repos.length) {
+    if (!S.net.me) await gh.me();   // nothing else would call GitHub, so a bad token would go unnoticed
+    return { chain: {}, deploys: {}, at: new Date().toISOString() };
+  }
   if (probe) {
     const moved = await Promise.all(repos.map((r) => gh.changed(r)));
     if (!moved.some(Boolean)) return null;   // nothing to fetch; keep the snapshot
@@ -1181,10 +1184,37 @@ async function refreshSystem(repos, { probe = false } = {}) {
   return { chain, deploys, at: new Date().toISOString() };
 }
 
+// a repo can deploy several services: newest deploy-like run across workflows credits the wrong one,
+// so settle on one file, production first. dynamic workflows have no file to ask for runs by
+async function inferWorkflow(repo) {
+  try {
+    const wfs = await activeWorkflows(`${repo.owner}/${repo.name}`);
+    const text = (w) => w.name + ' ' + w.path;
+    const deploys = wfs.filter((w) => w.path.startsWith('.github/') && isDeployish(text(w)));
+    // whole word only: product-tests.yml is not production
+    const hit = deploys.find((w) => /(^|[^a-z])prod(uction)?([^a-z]|$)/i.test(text(w))) ||
+      deploys.find((w) => /deploy/i.test(text(w))) || deploys[0];
+    return hit ? wfFile(hit.path) : '';
+  } catch {
+    return '';
+  }
+}
+
 async function deployOf(repo) {
   const base = repoUrl(repo);
-  // the configured workflow when the user picked one, else the runs whose name reads like a deploy
-  const all = (await gh.deployRuns(repo)).workflow_runs;
+  // the configured workflow when the user picked one, else the inferred one, else the runs whose
+  // name reads like a deploy
+  let workflow = repo.workflow || (await inferWorkflow(repo));
+  let all;
+  try {
+    all = (await gh.deployRuns({ ...repo, workflow })).workflow_runs;
+  } catch (e) {
+    // the cached inference outlived the file; one stale repo must not blank the whole board
+    if (repo.workflow || !workflow || !/^404/.test(e.message)) throw e;
+    wfCache.delete(`${repo.owner}/${repo.name}`);
+    workflow = '';
+    all = (await gh.deployRuns(repo)).workflow_runs;
+  }
   const deployish = all.filter((r) => isDeployish(r.name));
   const runs = deployish.length ? deployish : all;
   const newest = runs.find((r) => r.conclusion === 'success');
@@ -1192,18 +1222,9 @@ async function deployOf(repo) {
   const settled = latest && latest.status === 'completed' && latest.conclusion === 'success';
 
   // every run names its own file, so the workflow page costs no extra call
-  let file = repo.workflow || wfFile(latest?.path || newest?.path);
-  if (!file) {
-    try {
-      const wfs = (await gh.workflows(`${repo.owner}/${repo.name}`)).workflows || [];
-      const hit = wfs.find((w) => w.state === 'active' && isDeployish(w.name + ' ' + w.path));
-      file = hit ? wfFile(hit.path) : '';
-    } catch {
-      file = '';
-    }
-  }
+  const file = workflow || wfFile(latest?.path || newest?.path);
   return {
-    workflow: latest ? latest.name : repo.workflow || 'no workflow',
+    workflow: latest ? latest.name : workflow || 'no workflow',
     file,
     page: file ? `${base}/actions/workflows/${file}` : `${base}/actions`,
     live: newest && { sha: newest.head_sha, at: newest.created_at, url: newest.html_url, event: newest.event, name: newest.name },
@@ -1293,6 +1314,9 @@ function renderSystem() {
       (demoShown() ? demoWhy(row) : '') + `
     </div>`;
   }).join('');
+  if (!demoShown() && !S.prefs.repos.length) {
+    EL.out.innerHTML = '<div class="empty">No repos tracked. Press <b>tracking</b> to pick some.</div>';
+  }
 
   // the issue column only widens while there is a chain to draw in it
   EL.board.classList.toggle('deps', all.some((r) => r.gantt));
@@ -1823,6 +1847,8 @@ EL.tok.addEventListener('change', () => {
   S.prefs.token = EL.tok.value.trim();
   store.write(LS.token, S.prefs.token);
   S.net.err = null;
+  S.net.me = null;    // both belong to the previous token
+  wfCache.clear();
   setDemo(false);
   tick();
 });
@@ -1898,7 +1924,7 @@ async function openRepos(force = false) {
       </div>
       <div class="wfline">deploy workflow
         <select class="wf" data-wf="${esc(full)}" data-current="${esc(on ? picked.get(full).workflow || '' : '')}">
-          <option value="">auto (infer from runs)</option>
+          <option value="">auto (production deploy workflow)</option>
         </select>
       </div>
     </div>`;
@@ -1930,19 +1956,23 @@ function repoHint(total) {
   EL.repohint.textContent = `${n} tracked · ${total} visible to this token${age}`;
 }
 
-// one call per repo, and only while the modal is open
+// one call per repo per token
+async function activeWorkflows(full) {
+  if (!wfCache.has(full)) {
+    wfCache.set(full, ((await gh.workflows(full)).workflows || []).filter((w) => w.state === 'active'));
+  }
+  return wfCache.get(full);
+}
+
 async function fillWorkflows(full) {
   const sel = document.querySelector(`select.wf[data-wf="${full}"]`);
   if (!sel || sel.dataset.filled) return;
   sel.dataset.filled = '1';
-  let wfs = wfCache.get(full);
-  if (!wfs) {
-    try {
-      wfs = ((await gh.workflows(full)).workflows || []).filter((w) => w.state === 'active');
-      wfCache.set(full, wfs);
-    } catch {
-      return;
-    }
+  let wfs;
+  try {
+    wfs = await activeWorkflows(full);
+  } catch {
+    return;
   }
   for (const w of wfs) {
     const file = wfFile(w.path);
