@@ -2,6 +2,10 @@
 
 See every change on one screen, across repos, from issue to production.
 
+chainview is a GitHub dashboard for orienting and pushing work done by a team or by AI coding agents. Each row follows one work item through issue, pull request, CI, review, merge and deploy, across repos, so you can see what is blocked and what is waiting on you.
+
+It is one static HTML file with no backend. It works with GitHub only for now.
+
 Live: https://sp0lsh.github.io/chainview/
 
 ![Token screen over the example board](screenshot.png)
